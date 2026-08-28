@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/brglng/pi-packages/main/packages/pi-currency-cost/schemas/config.schema.json",
+  "$schema": "https://raw.githubusercontent.com/brglng/pi-currency-cost/main/schemas/config.schema.json",
   "currencies": {
     "CNY": {
       "usdRate": 0.147

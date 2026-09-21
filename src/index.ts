@@ -172,7 +172,7 @@ class CurrencyCostRuntime {
       return;
     }
     const note = await this.persistFetchedRates(agentDir, cwd, result);
-    ctx.ui.notify(note, result.errors.length > 0 ? "warning" : "info");
+    ctx.ui.notify(note, "info");
   }
 
   private async persistFetchedRates(

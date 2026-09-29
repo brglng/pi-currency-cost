@@ -1,6 +1,6 @@
 {
   "name": "@brglng/pi-currency-cost",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Convert configured provider/model usage costs to USD for Pi sessions",
   "type": "module",
   "exports": {

@@ -419,6 +419,7 @@ describe("extension lifecycle (no paid model requests)", () => {
         ctx,
       );
       const note = ctx.notifications[0]?.message ?? "";
+      expect(ctx.notifications[0]?.type).toBe("info");
       expect(note).toContain("updated USD rates");
       expect(note).toContain("Keeping the configured usdRate");
       // No rate was persisted; the configured usdRate stays in effect.

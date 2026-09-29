@@ -108,7 +108,7 @@ class CurrencyCostRuntime {
     }
     const note = await this.persistFetchedRates(agentDir, cwd, result);
     if (result.errors.length > 0) {
-      this.enqueueNote(note, "warning");
+      this.enqueueNote(note, "info");
     }
   }
 

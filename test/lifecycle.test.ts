@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -8,6 +15,7 @@ import type {
   MessageEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { getProjectConfigPath } from "#src/config-paths";
 import { createCurrencyCostExtension } from "#src/index";
 
 // Mirrors the real Bank of China table layout; 中行折算价 is cell 5.
@@ -219,6 +227,8 @@ describe("extension lifecycle (no paid model requests)", () => {
       const status = ctx.notifications[0]?.message ?? "";
       expect(status).toContain("CNY");
       expect(status).toContain("Global config");
+      expect(status).toContain(join(agentDir, "settings.json"));
+      expect(status).toContain(join(agentDir, "models.json"));
       expect(status).toContain("bailian");
       await command?.handler("help", ctx);
       expect(ctx.notifications[1]?.message).toContain("Usage: /currency-cost");
@@ -388,6 +398,104 @@ describe("extension lifecycle (no paid model requests)", () => {
       );
       // The in-memory conversion and the on-disk rate match.
       expect(ctx.notifications.length).toBe(0);
+    } finally {
+      await Promise.all([
+        rm(agentDir, { recursive: true, force: true }),
+        rm(cwd, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("refreshes inline and legacy rates in their respective files and reloads them", async () => {
+    const { agentDir, cwd } = await tempProject({
+      currencies: { CNY: { usdRate: 0.13 }, EUR: { usdRate: 1.1 } },
+    });
+    const path = join(agentDir, "settings.json");
+    const modelsPath = join(agentDir, "models.json");
+    const models = '{"providers":{"gateway":{"currency":"CNY"}}}';
+    const original = `{
+  "theme": "dark", "packages": ["npm:example"],
+  "pi-currency-cost": { "currencies": { " cny ": { "usdRate": 0.10 } } },
+  "pi-currency-cost": {
+    "currencies": {
+      "CNY": { "usdRate": 0.11 },
+      " cny ": { "usdRate": 0.12, "usdRate": 0.14, "extra": true },
+      "EUR": { "usdRate": -1 }
+    }
+  }
+}
+`;
+    try {
+      await writeFile(path, original, { mode: 0o640 });
+      await writeFile(modelsPath, models);
+      const permissions = (await stat(path)).mode;
+      const pi = fakePi();
+      const installed = await createCurrencyCostExtension(buildPi(pi), {
+        agentDir,
+        cwd,
+        fetchImpl: jsonFetch(),
+        skipStartupFetch: true,
+      });
+      const refresh = pi.commands.get("currency-cost");
+      expect(refresh).toBeDefined();
+      await refresh?.handler("refresh", fakeCtx());
+      const saved = await readFile(path, "utf8");
+      const fresh = 100 / 678.54;
+      expect(
+        saved.replace(/,"updatedAt": \d+/, "").replace(String(fresh), "0.14"),
+      ).toBe(original);
+      expect((await stat(path)).mode).toBe(permissions);
+      expect(await readFile(modelsPath, "utf8")).toBe(models);
+      const project = JSON.parse(
+        await readFile(getProjectConfigPath(cwd), "utf8"),
+      );
+      expect(project.currencies.CNY).toEqual({ usdRate: 0.13 });
+      expect(project.currencies.EUR.usdRate).toBeCloseTo(fresh, 12);
+      await installed.reload();
+      expect(installed.runtime.config.currencies.CNY).toEqual({
+        usdRate: fresh,
+        updatedAt: expect.any(Number),
+      });
+
+      // A competing Pi writer's lock must not be removed or bypassed.
+      const lock = `${path}.lock`;
+      await mkdir(lock);
+      const lockedCtx = fakeCtx();
+      await refresh?.handler("refresh", lockedCtx);
+      expect(lockedCtx.notifications[0]?.message).toContain(
+        "Keeping the configured usdRate for: CNY",
+      );
+      expect(await readFile(path, "utf8")).toBe(saved);
+      expect((await stat(lock)).isDirectory()).toBe(true);
+      await rm(lock, { recursive: true });
+
+      // Don't recreate, overwrite, or redirect a rate whose entry disappeared,
+      // became invalid, or was superseded since the last reload.
+      for (const replacement of [
+        undefined,
+        '{ "apiKey": secret-value }',
+        '{"pi-currency-cost":{"currencies":{"cny":{"usdRate":0.12}}}}',
+      ]) {
+        if (replacement === undefined) await rm(path);
+        else await writeFile(path, replacement);
+        const ctx = fakeCtx();
+        await refresh?.handler("refresh", ctx);
+        expect(ctx.notifications[0]?.message).toContain(
+          "Keeping the configured usdRate for: CNY",
+        );
+        expect(ctx.notifications[0]?.message).not.toContain("secret-value");
+        if (replacement === undefined) {
+          await expect(readFile(path)).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        } else {
+          expect(await readFile(path, "utf8")).toBe(replacement);
+        }
+        const legacy = JSON.parse(
+          await readFile(getProjectConfigPath(cwd), "utf8"),
+        );
+        expect(legacy.currencies.CNY).toEqual({ usdRate: 0.13 });
+      }
     } finally {
       await Promise.all([
         rm(agentDir, { recursive: true, force: true }),

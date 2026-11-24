@@ -7,14 +7,14 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   type ConfigWarnings,
   type CurrencyCostConfig,
-  type CurrencyRateConfig,
-  loadConfig,
+  loadConfigWithSources,
 } from "./config";
 import {
   getGlobalConfigPath,
   getProjectConfigPath,
   getWritableConfigPath,
 } from "./config-paths";
+import { getModelsConfigPath } from "./models-config";
 import {
   fetchUsdRates,
   hasValidUsdRate,
@@ -22,7 +22,8 @@ import {
   rateSourceDescription,
   selectUsdRate,
 } from "./rates";
-import { updateWritableConfig } from "./store";
+import { getSettingsConfigPath } from "./settings-config";
+import { updateInlineRate, updateWritableConfig } from "./store";
 import { convertUsageCost } from "./usage-cost";
 
 const COMMAND_NAME = "currency-cost";
@@ -51,8 +52,10 @@ class CurrencyCostRuntime {
   readonly convertedMessages = new WeakSet<object>();
   private readonly warned = new Set<string>();
   private pendingNotes: Note[] = [];
-  /** Config load warnings (not yet reported over a session context). */
-  constructor(public config: CurrencyCostConfig) {}
+  constructor(
+    public config: CurrencyCostConfig,
+    public inlineRateKeys: ReadonlyMap<string, string>,
+  ) {}
 
   enqueueNote(text: string, type: Note["type"]): void {
     this.pendingNotes.push({ text, type });
@@ -180,14 +183,25 @@ class CurrencyCostRuntime {
     cwd: string,
     result: RateFetchResult,
   ): Promise<string> {
-    const writable = await getWritableConfigPath(agentDir, cwd);
+    let writable: string | undefined;
     const updatedAt = Date.now();
+    const persisted = new Map<string, number>();
     for (const [code, rate] of result.rates) {
       try {
-        await updateWritableConfig(writable, code, {
-          usdRate: rate,
-          updatedAt,
-        });
+        const inlineKey = this.inlineRateKeys.get(code);
+        const update = { usdRate: rate, updatedAt };
+        if (inlineKey !== undefined) {
+          await updateInlineRate(
+            getSettingsConfigPath(agentDir),
+            code,
+            inlineKey,
+            update,
+          );
+        } else {
+          writable ??= await getWritableConfigPath(agentDir, cwd);
+          await updateWritableConfig(writable, code, update);
+        }
+        persisted.set(code, rate);
         this.config.currencies[code] = {
           ...this.config.currencies[code],
           usdRate: rate,
@@ -203,7 +217,7 @@ class CurrencyCostRuntime {
     const lines = [
       `pi-currency-cost: updated USD rates (source: ${rateSourceDescription(this.config.rateSource)})`,
     ];
-    for (const [code, rate] of result.rates) {
+    for (const [code, rate] of persisted) {
       lines.push(`  ${code}: 1 ${code} = ${rate.toFixed(6)} USD`);
     }
     if (result.errors.length > 0) {
@@ -232,9 +246,11 @@ class CurrencyCostRuntime {
     const lines = [
       `pi-currency-cost status`,
       ``,
+      `Pi settings   : ${getSettingsConfigPath(agentDir)}`,
+      `Pi models     : ${getModelsConfigPath(agentDir)}`,
       `Global config : ${getGlobalConfigPath(agentDir)}`,
       `Project config: ${getProjectConfigPath(cwd)}`,
-      `Writable path : ${await getWritableConfigPath(agentDir, cwd)}`,
+      `Legacy writable path: ${await getWritableConfigPath(agentDir, cwd)}`,
       `Rate source   : ${rateSourceDescription(this.config.rateSource)}`,
       ``,
     ];
@@ -307,13 +323,13 @@ export async function createCurrencyCostExtension(
 
   // Load config before registering any hooks/commands so startup never
   // races config loading against message_end handling.
-  const loaded = await loadConfig(agentDir, cwd);
-  const state = { config: loaded.config, warnings: loaded.warnings };
-  const runtime = new CurrencyCostRuntime(loaded.config);
+  const loaded = await loadConfigWithSources(agentDir, cwd);
+  let warnings = loaded.warnings;
+  const runtime = new CurrencyCostRuntime(loaded.config, loaded.inlineRateKeys);
 
   let startupFetchDone = false;
   pi.on("session_start", async (_event, ctx) => {
-    for (const note of describeConfigWarnings(state.warnings)) {
+    for (const note of describeConfigWarnings(warnings)) {
       runtime.enqueueNote(note.text, note.type);
     }
     runtime.flushNotes(ctx);
@@ -381,10 +397,10 @@ export async function createCurrencyCostExtension(
   return {
     runtime,
     reload: async () => {
-      const reloaded = await loadConfig(agentDir, cwd);
-      state.config = reloaded.config;
-      state.warnings = reloaded.warnings;
+      const reloaded = await loadConfigWithSources(agentDir, cwd);
+      warnings = reloaded.warnings;
       runtime.config = reloaded.config;
+      runtime.inlineRateKeys = reloaded.inlineRateKeys;
     },
   };
 }

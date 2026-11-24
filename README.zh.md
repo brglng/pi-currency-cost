@@ -14,7 +14,56 @@ pi install npm:@brglng/pi-currency-cost
 
 ## 配置
 
-扩展读取两份可选的 JSON 配置文件并把它们合并，其中项目配置优先于全局配置：
+### 在 Pi 的 settings.json 中配置汇率
+
+将 `pi-currency-cost` 命名空间添加到 Pi 的全局 `<agentDir>/settings.json`
+（默认为 `~/.pi/agent/settings.json`）。请使用严格的 JSON，不要添加注释或
+尾随逗号。扩展会忽略项目设置和 `models.json` 中的此命名空间。
+
+```json
+{
+  "pi-currency-cost": {
+    "currencies": {
+      "CNY": { "usdRate": 0.147 }
+    },
+    "currencyExchangeRateSource": { "type": "frankfurter" }
+  }
+}
+```
+
+此处有效的汇率及汇率来源设置优先于合并后的旧版配置。
+
+### 在 Pi 的 models.json 中声明 Provider 和模型的币种
+
+在 Pi 的全局 `<agentDir>/models.json` 中，将 `currency` 写在对应的 Provider
+或模型定义中。请将以下字段合并到现有配置中；示例省略了 Pi 为自定义模型
+所需的其他字段。
+
+```json
+{
+  "providers": {
+    "bailian": {
+      "currency": "CNY",
+      "models": [
+        { "id": "custom-usd-model", "currency": "USD" }
+      ]
+    },
+    "openrouter": {
+      "modelOverrides": {
+        "some-model-id": { "currency": "CNY" }
+      }
+    }
+  }
+}
+```
+
+币种优先级为**内联模型 → 内联 Provider → 旧版模型 → 旧版 Provider**。
+对同一模型 ID，`modelOverrides` 中有效的币种优先于 `models` 中的币种。
+使用 `USD` 可让模型费用保持原样。内联值缺失或无效时，使用下一级适用设置。
+
+### 旧版配置文件
+
+扩展仍读取两份可选的 JSON 配置文件并把它们合并，其中项目配置优先于全局配置：
 
 - 全局：`~/.pi/agent/extensions/pi-currency-cost/config.json`
 - 项目：`<cwd>/.pi/extensions/pi-currency-cost/config.json`
@@ -122,6 +171,9 @@ Pi 报告该 Provider 用量费用所用的币种，也可以在此基础上叠�
 每次会话开始时，扩展会为所有配置的非 USD 币种取最新汇率，并写回同一个
 `usdRate` 字段，这样换算始终使用扩展能取得的最新汇率。你也可以随时用
 `/currency-cost refresh` 手动触发。
+
+如果生效的 `usdRate` 来自全局 `settings.json`，更新会写回该条目，不改动其他设置。
+其他汇率仍写入旧版配置：有项目配置文件时写入该文件，否则写入全局配置文件。
 
 ## 网络与回退
 

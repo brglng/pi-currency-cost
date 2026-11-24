@@ -1,5 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { EXTENSION_ID } from "./config-paths";
+import {
+  getModelsConfigPath,
+  isPositiveFinite,
+  isRecord,
+  readModelsConfig,
+} from "./models-config";
+import { readSettingsConfig } from "./settings-config";
 
 /**
  * One currency entry. `usdRate` is the sole conversion rate (USD per one
@@ -83,10 +91,6 @@ function isSafeConfigKey(key: string): boolean {
   return !UNSAFE_CONFIG_KEYS.has(key);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Uppercase a raw currency code and validate the normalized 3-letter form. */
 export function normalizeCurrencyCode(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -94,14 +98,11 @@ export function normalizeCurrencyCode(value: unknown): string | undefined {
   return CURRENCY_CODE_RE.test(normalized) ? normalized : undefined;
 }
 
-function isPositiveFinite(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0;
-}
-
 function applyTimeoutMs(
   raw: Record<string, unknown>,
   base: number | undefined,
   warnings: ConfigWarnings,
+  sourceLabel = "rateSource",
 ): number | undefined {
   const value = raw.timeoutMs;
   if (value === undefined) return base;
@@ -111,7 +112,7 @@ function applyTimeoutMs(
       Math.max(MIN_TIMEOUT_MS, Math.trunc(value)),
     );
   }
-  warnings.push("rateSource.timeoutMs must be a positive number; ignoring");
+  warnings.push(`${sourceLabel}.timeoutMs must be a positive number; ignoring`);
   return base;
 }
 
@@ -395,24 +396,159 @@ async function readJson(path: string): Promise<unknown> {
   }
 }
 
-/**
- * Load and merge the global config (`<agentDir>/extensions/pi-currency-cost/config.json`)
- * and the project config (`<cwd>/.pi/extensions/pi-currency-cost/config.json`).
- * Project values override global values; currency entries and provider
- * mappings are merged per field/key.
- */
+/** Never include raw model-file values or keys in configuration warnings. */
+function inlineCurrency(value: unknown, warnings: ConfigWarnings) {
+  if (value === undefined) return undefined;
+  const code = normalizeCurrencyCode(value);
+  if (!code)
+    warnings.push("models.json: currency must be a 3-letter code; ignoring");
+  return code;
+}
+
+function applyInlineProviders(
+  raw: unknown,
+  providers: CurrencyCostConfig["providers"],
+  warnings: ConfigWarnings,
+): void {
+  if (!isRecord(raw)) return;
+  for (const [id, provider] of Object.entries(raw)) {
+    if (!id.trim() || !isSafeConfigKey(id) || !isRecord(provider)) continue;
+    const currency = inlineCurrency(provider.currency, warnings);
+    const models: Record<string, ProviderModelCurrency> = {};
+    const addModel = (modelId: unknown, value: unknown) => {
+      if (
+        typeof modelId !== "string" ||
+        !modelId.trim() ||
+        !isSafeConfigKey(modelId)
+      )
+        return;
+      const code = inlineCurrency(value, warnings);
+      if (code) models[modelId] = { currency: code };
+    };
+
+    if (Array.isArray(provider.models)) {
+      for (const model of provider.models) {
+        if (isRecord(model)) addModel(model.id, model.currency);
+      }
+    }
+    if (isRecord(provider.modelOverrides)) {
+      for (const [modelId, override] of Object.entries(
+        provider.modelOverrides,
+      )) {
+        if (isRecord(override)) addModel(modelId, override.currency);
+      }
+    }
+
+    const legacy = Object.hasOwn(providers, id) ? providers[id] : undefined;
+    if (currency) {
+      // An inline provider default wins even over legacy model mappings.
+      providers[id] = { currency, models };
+    } else if (Object.keys(models).length > 0) {
+      providers[id] = { ...legacy, models: { ...legacy?.models, ...models } };
+    }
+  }
+}
+
+export async function loadConfigWithSources(agentDir: string, cwd: string) {
+  const inlineWarnings: ConfigWarnings = [];
+  const [globalRaw, projectRaw, models, settingsRaw] = await Promise.all([
+    readJson(join(agentDir, "extensions", "pi-currency-cost", "config.json")),
+    readJson(join(cwd, ".pi", "extensions", "pi-currency-cost", "config.json")),
+    readModelsConfig(getModelsConfigPath(agentDir)).catch(() => {
+      inlineWarnings.push(
+        "Could not read a valid models.json; ignoring provider/model currency declarations",
+      );
+      return undefined;
+    }),
+    readSettingsConfig(agentDir).catch(() => {
+      inlineWarnings.push(
+        "Could not read a valid settings.json; ignoring pi-currency-cost settings",
+      );
+      return undefined;
+    }),
+  ]);
+  const global = normalizeConfig(globalRaw);
+  const { config, warnings: projectWarnings } = normalizeConfig(
+    projectRaw,
+    global.config,
+  );
+  const inlineRateKeys = new Map<string, string>();
+  const settings = settingsRaw?.[EXTENSION_ID];
+
+  if (isRecord(settings)) {
+    if (isRecord(settings.currencies)) {
+      for (const [key, value] of Object.entries(settings.currencies)) {
+        const code = normalizeCurrencyCode(key);
+        if (!code || !isRecord(value) || !isPositiveFinite(value.usdRate)) {
+          inlineWarnings.push(
+            "settings.json: inline currency rates require a 3-letter code and positive usdRate; ignoring entry",
+          );
+          continue;
+        }
+        const warnings: ConfigWarnings = [];
+        const entry = normalizeCurrencyEntry(value, undefined, warnings);
+        inlineWarnings.push(
+          ...warnings.map((warning) => `settings.json: ${warning}`),
+        );
+        config.currencies[code] = entry;
+        inlineRateKeys.set(code, key);
+      }
+    } else if (settings.currencies !== undefined) {
+      inlineWarnings.push(
+        "settings.json: currencies must be an object; ignoring",
+      );
+    }
+
+    const source = settings.currencyExchangeRateSource;
+    if (isRecord(source)) {
+      const type = source.type;
+      if (type !== undefined && type !== "boc" && type !== "frankfurter") {
+        inlineWarnings.push(
+          'settings.json: currencyExchangeRateSource.type must be "boc" or "frankfurter"; keeping previous',
+        );
+      }
+      config.rateSource = {
+        type:
+          type === "boc" || type === "frankfurter"
+            ? type
+            : config.rateSource.type,
+        timeoutMs: applyTimeoutMs(
+          source,
+          config.rateSource.timeoutMs,
+          inlineWarnings,
+          "settings.json: currencyExchangeRateSource",
+        ),
+      };
+    } else if (source === "boc" || source === "frankfurter") {
+      config.rateSource = { ...config.rateSource, type: source };
+    } else if (source !== undefined) {
+      inlineWarnings.push(
+        "settings.json: invalid currencyExchangeRateSource; keeping previous",
+      );
+    }
+  } else if (settings !== undefined) {
+    inlineWarnings.push(
+      "settings.json: pi-currency-cost must be an object; ignoring",
+    );
+  }
+
+  applyInlineProviders(models?.providers, config.providers, inlineWarnings);
+  return {
+    config,
+    warnings: [
+      ...global.warnings,
+      ...projectWarnings,
+      ...new Set(inlineWarnings),
+    ],
+    inlineRateKeys,
+  };
+}
+
+/** Load the effective config without exposing internal rate write locations. */
 export async function loadConfig(
   agentDir: string,
   cwd: string,
 ): Promise<{ config: CurrencyCostConfig; warnings: ConfigWarnings }> {
-  const [globalRaw, projectRaw] = await Promise.all([
-    readJson(join(agentDir, "extensions", "pi-currency-cost", "config.json")),
-    readJson(join(cwd, ".pi", "extensions", "pi-currency-cost", "config.json")),
-  ]);
-  const global = normalizeConfig(globalRaw);
-  const project = normalizeConfig(projectRaw, global.config);
-  return {
-    config: project.config,
-    warnings: [...global.warnings, ...project.warnings],
-  };
+  const { config, warnings } = await loadConfigWithSources(agentDir, cwd);
+  return { config, warnings };
 }

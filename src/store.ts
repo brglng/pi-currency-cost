@@ -1,9 +1,22 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { applyEdits, modify, type Node, parseTree } from "jsonc-parser";
+import { normalizeCurrencyCode } from "./config";
+import { EXTENSION_ID } from "./config-paths";
+import { isPositiveFinite, isRecord } from "./models-config";
+import { parseSettingsConfig } from "./settings-config";
 
 /**
  * Read a raw config JSON file. Returns undefined when the file does not
@@ -83,5 +96,108 @@ export async function updateWritableConfig(
     };
     await writeConfigAtomic(path, nextRoot);
     return nextRoot;
+  });
+}
+
+// Match JSON.parse's last-wins semantics for duplicate properties.
+function propertyValue(node: Node | undefined, key: string): Node | undefined {
+  return node?.children?.findLast(
+    (child) => child.type === "property" && child.children?.[0]?.value === key,
+  )?.children?.[1];
+}
+
+/** Update only an existing, effective inline rate. Never create settings.json. */
+export async function updateInlineRate(
+  path: string,
+  code: string,
+  key: string,
+  update: CurrencyUpdate,
+): Promise<void> {
+  return enqueueWrite(async () => {
+    const lock = `${path}.lock`;
+    try {
+      // Pi uses a sibling lock directory at the configured (unresolved) path.
+      // If another writer holds it, leave the configured rate in effect.
+      await mkdir(lock);
+    } catch {
+      throw new Error("Could not lock settings.json to update inline rate");
+    }
+    try {
+      const target = await realpath(path);
+      const info = await stat(target);
+      if (!info.isFile()) throw new Error();
+      const text = await readFile(target, "utf8");
+      const raw = parseSettingsConfig(text);
+      const settings = raw[EXTENSION_ID];
+      const currencies = isRecord(settings) ? settings.currencies : undefined;
+      if (!isRecord(currencies)) throw new Error();
+      const effective = Object.entries(currencies).findLast(
+        ([name, entry]) =>
+          normalizeCurrencyCode(name) === code &&
+          isRecord(entry) &&
+          isPositiveFinite(entry.usdRate),
+      );
+      if (effective?.[0] !== key) throw new Error();
+
+      const bomLength = text.startsWith("\uFEFF") ? 1 : 0;
+      const source = text.slice(bomLength);
+      const tree = parseTree(source);
+      const entry = propertyValue(
+        propertyValue(propertyValue(tree, EXTENSION_ID), "currencies"),
+        key,
+      );
+      const rate = propertyValue(entry, "usdRate");
+      if (!entry || !rate) throw new Error();
+      const timestamp = propertyValue(entry, "updatedAt");
+      const entryText = source.slice(entry.offset, entry.offset + entry.length);
+      const edits = [
+        {
+          offset: rate.offset - entry.offset,
+          length: rate.length,
+          content: JSON.stringify(update.usdRate),
+        },
+        ...(timestamp
+          ? [
+              {
+                offset: timestamp.offset - entry.offset,
+                length: timestamp.length,
+                content: JSON.stringify(update.updatedAt),
+              },
+            ]
+          : modify(entryText, ["updatedAt"], update.updatedAt, {})),
+      ];
+      const edited =
+        text.slice(0, bomLength + entry.offset) +
+        applyEdits(entryText, edits) +
+        source.slice(entry.offset + entry.length);
+      parseSettingsConfig(edited);
+
+      // Stage privately: settings.json may contain sensitive data. Apply the
+      // original mode before replacing the file, without changing symlinks.
+      const directory = await mkdtemp(
+        join(dirname(target), ".pi-currency-cost-"),
+      );
+      try {
+        const tmp = join(directory, "settings.json");
+        await writeFile(tmp, edited, { mode: 0o600 });
+        await chmod(tmp, info.mode & 0o777);
+        if (
+          (await realpath(path)) !== target ||
+          (await readFile(target, "utf8")) !== text
+        ) {
+          throw new Error();
+        }
+        await rename(tmp, target);
+      } finally {
+        await rm(directory, { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+      }
+    } catch {
+      // Parse and filesystem errors may contain sensitive text or paths.
+      throw new Error("Could not safely update inline rate in settings.json");
+    } finally {
+      await rmdir(lock).catch(() => undefined);
+    }
   });
 }

@@ -15,7 +15,60 @@ pi install npm:@brglng/pi-currency-cost
 
 ## Configuration
 
-The extension reads two optional JSON files and merges them, with the project
+### Rates in Pi's settings.json
+
+Add the `pi-currency-cost` namespace to Pi's global `<agentDir>/settings.json`
+(default: `~/.pi/agent/settings.json`). Use strict JSON (no comments or
+trailing commas). The extension ignores this namespace in project settings
+and in `models.json`.
+
+```json
+{
+  "pi-currency-cost": {
+    "currencies": {
+      "CNY": { "usdRate": 0.147 }
+    },
+    "currencyExchangeRateSource": { "type": "frankfurter" }
+  }
+}
+```
+
+Valid rates and rate-source settings here take precedence over the merged
+legacy configuration.
+
+### Provider and model currencies in Pi's models.json
+
+Declare `currency` beside the provider or model definition in Pi's global
+`<agentDir>/models.json`. Merge these fields into your existing configuration;
+this excerpt omits the other fields Pi needs for custom models.
+
+```json
+{
+  "providers": {
+    "bailian": {
+      "currency": "CNY",
+      "models": [
+        { "id": "custom-usd-model", "currency": "USD" }
+      ]
+    },
+    "openrouter": {
+      "modelOverrides": {
+        "some-model-id": { "currency": "CNY" }
+      }
+    }
+  }
+}
+```
+
+Currency precedence is **inline model → inline provider → legacy model →
+legacy provider**. Within an inline provider, a valid `modelOverrides`
+currency wins over a `models` entry with the same ID. Use `USD` to leave a
+model's costs unchanged. Missing or invalid inline values fall back to the
+next applicable setting.
+
+### Legacy configuration files
+
+The extension also reads two optional JSON files and merges them, with the project
 file taking precedence over the global file:
 
 - Global: `~/.pi/agent/extensions/pi-currency-cost/config.json`
@@ -131,6 +184,11 @@ At the start of each session, the extension fetches the latest rate for every
 configured non-USD currency and saves it back to the same `usdRate` field, so
 conversion always uses the most recent rate the extension can obtain. You can
 also trigger this manually at any time with `/currency-cost refresh`.
+
+If the effective `usdRate` came from global `settings.json`, updates go back to
+that entry without rewriting unrelated settings. Other rates
+are saved to the legacy project file if it exists, or the legacy global file
+otherwise.
 
 ## Network and fallback
 

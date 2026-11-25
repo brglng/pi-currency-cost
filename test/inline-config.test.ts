@@ -100,7 +100,7 @@ describe("inline Pi configuration", () => {
       JSON.stringify({
         "pi-currency-cost": {
           currencies: { EUR: { usdRate: 9 } },
-          currencyExchangeRateSource: "frankfurter",
+          exchangeRateSource: "frankfurter",
         },
       }),
     );
@@ -113,7 +113,7 @@ describe("inline Pi configuration", () => {
             EUR: { usdRate: -1 },
           },
           rateSource: { type: "frankfurter" }, // Legacy field is ignored here.
-          currencyExchangeRateSource: { type: "unsupported", timeoutMs: 3500 },
+          exchangeRateSource: { type: "unsupported", timeoutMs: 3500 },
         },
       }),
     );
@@ -123,21 +123,34 @@ describe("inline Pi configuration", () => {
       EUR: { usdRate: 1.2 },
     });
     expect(config.rateSource).toEqual({ type: "boc", timeoutMs: 3500 });
-    expect(warnings.join()).toContain(
-      "settings.json: currencyExchangeRateSource.type",
-    );
+    expect(warnings.join()).toContain("settings.json: exchangeRateSource.type");
     expect(warnings.join()).not.toContain("unsupported");
   });
 
-  it("uses currencyExchangeRateSource without a legacy config file", async () => {
+  it("uses exchangeRateSource without a legacy config file", async () => {
     await write(
       join(agentDir, "settings.json"),
       JSON.stringify({
-        "pi-currency-cost": { currencyExchangeRateSource: { type: "boc" } },
+        "pi-currency-cost": { exchangeRateSource: { type: "boc" } },
       }),
     );
     const { config, warnings } = await loadConfig(agentDir, cwd);
     expect(config.rateSource.type).toBe("boc");
+    expect(warnings).toEqual([]);
+  });
+
+  it("ignores the former inline rate source key", async () => {
+    await write(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        "pi-currency-cost": {
+          currencyExchangeRateSource: { type: "boc", timeoutMs: 1 },
+        },
+      }),
+    );
+    const { config, warnings } = await loadConfig(agentDir, cwd);
+    expect(config.rateSource.type).toBe("frankfurter");
+    expect(config.rateSource.timeoutMs).not.toBe(1);
     expect(warnings).toEqual([]);
   });
 
@@ -148,7 +161,7 @@ describe("inline Pi configuration", () => {
         providers: { gateway: { currency: "CNY" } },
         "pi-currency-cost": {
           currencies: { CNY: { usdRate: 0.16 } },
-          currencyExchangeRateSource: "boc",
+          exchangeRateSource: "boc",
         },
       }),
     );

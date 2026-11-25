@@ -499,12 +499,12 @@ export async function loadConfigWithSources(agentDir: string, cwd: string) {
       );
     }
 
-    const source = settings.currencyExchangeRateSource;
+    const source = settings.exchangeRateSource;
     if (isRecord(source)) {
       const type = source.type;
       if (type !== undefined && type !== "boc" && type !== "frankfurter") {
         inlineWarnings.push(
-          'settings.json: currencyExchangeRateSource.type must be "boc" or "frankfurter"; keeping previous',
+          'settings.json: exchangeRateSource.type must be "boc" or "frankfurter"; keeping previous',
         );
       }
       config.rateSource = {
@@ -516,14 +516,14 @@ export async function loadConfigWithSources(agentDir: string, cwd: string) {
           source,
           config.rateSource.timeoutMs,
           inlineWarnings,
-          "settings.json: currencyExchangeRateSource",
+          "settings.json: exchangeRateSource",
         ),
       };
     } else if (source === "boc" || source === "frankfurter") {
       config.rateSource = { ...config.rateSource, type: source };
     } else if (source !== undefined) {
       inlineWarnings.push(
-        "settings.json: invalid currencyExchangeRateSource; keeping previous",
+        "settings.json: invalid exchangeRateSource; keeping previous",
       );
     }
   } else if (settings !== undefined) {

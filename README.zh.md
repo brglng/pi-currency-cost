@@ -26,12 +26,15 @@ pi install npm:@brglng/pi-currency-cost
     "currencies": {
       "CNY": { "usdRate": 0.147 }
     },
-    "currencyExchangeRateSource": { "type": "frankfurter" }
+    "exchangeRateSource": { "type": "frankfurter" }
   }
 }
 ```
 
 此处有效的汇率及汇率来源设置优先于合并后的旧版配置。
+
+从 0.2.0 升级时，请在 `settings.json` 中将 `currencyExchangeRateSource`
+改为 `exchangeRateSource`。扩展会忽略旧键。
 
 ### 在 Pi 的 models.json 中声明 Provider 和模型的币种
 

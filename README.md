@@ -28,13 +28,16 @@ and in `models.json`.
     "currencies": {
       "CNY": { "usdRate": 0.147 }
     },
-    "currencyExchangeRateSource": { "type": "frankfurter" }
+    "exchangeRateSource": { "type": "frankfurter" }
   }
 }
 ```
 
 Valid rates and rate-source settings here take precedence over the merged
 legacy configuration.
+
+Upgrading from 0.2.0: rename `currencyExchangeRateSource` to
+`exchangeRateSource` in `settings.json`. The old key is ignored.
 
 ### Provider and model currencies in Pi's models.json
 
